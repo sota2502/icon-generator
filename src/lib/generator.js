@@ -18,7 +18,7 @@ class ImageAnalyzer {
 
     const mapColor = (x, y) => {
       const index = (png.width * y + x) * 4
-      return [0, 1, 2].map(offset => png.data[index + offset])
+      return [0, 1, 2, 3].map(offset => png.data[index + offset])
     }
     const top = [...Array(png.height).keys()].find(y => {
       const colors = [...Array(png.width).keys()].map(x => mapColor(x, y))
@@ -46,7 +46,6 @@ class ImageAnalyzer {
   }
 
   corners() {
-    const colorMargin = 5
     const png = this.png
     return [
       0,
@@ -56,23 +55,25 @@ class ImageAnalyzer {
     ].map(pos => {
       const index = pos * 4
       return [
-        png.data[index] + colorMargin,     //r
-        png.data[index + 1] + colorMargin, //g
-        png.data[index + 2] + colorMargin  //b
+        png.data[index],     //r
+        png.data[index + 1], //g
+        png.data[index + 2]  //b
       ]
     })
   }
 
   trimmingRect() {
     return {
-      width: this.trimming.right - this.trimming.left,
-      height: this.trimming.bottom - this.trimming.top
+      width: this.trimming.right - this.trimming.left + 1,
+      height: this.trimming.bottom - this.trimming.top + 1
     }
   }
 
-  isOpaque(color) {
+  isOpaque(color, colorMargin = 7) {
     const threshold = this.threshold
-    return [0, 1, 2].some(offset => color[offset] > threshold[offset])
+    if ( color[3] < 0xff ) { return false }
+
+    return [0, 1, 2].some(offset => color[offset] > threshold[offset] + colorMargin)
   }
 }
 
@@ -92,65 +93,127 @@ class Trimmer {
 class Filler {
   constructor(imageAnalyzer) {
     this.imageAnalyzer = imageAnalyzer
+    this.rect = imageAnalyzer.trimmingRect()
   }
 
   call(newfile) {
+    this.#fillOuter(newfile)
+    this.#makeStraight(newfile)
+  }
+
+  #fillOuter(newfile) {
     const source = Buffer.from(newfile.data)
     const rect = this.imageAnalyzer.trimmingRect()
-    const trimming = this.imageAnalyzer.trimming
 
-    const posToIndex = (x, y) => (rect.width * y + x) * 4
-    const mapColor = (x, y) => {
-      const index = posToIndex(x, y)
-      return [0, 1, 2].map(offset => source[index + offset])
-    }
-    const makeTransparent = (x, y) => {
-      const index = posToIndex(x, y)
-      newfile.data[index]     = 0
-      newfile.data[index + 1] = 0
-      newfile.data[index + 2] = 0
-      newfile.data[index + 3] = 0
+    const MARGIN = {
+      LEFT: 10,
+      TOP: 16,
+      RIGHT: 8,
+      BOTTOM: 8
     }
 
     // left->right
     for(const y of Array(rect.height).keys()) {
       for(const x of Array(rect.width).keys()) {
-        const color = mapColor(x, y)
+        const color = this.#mapColor(source, x, y)
         if( this.imageAnalyzer.isOpaque(color) ) { break }
 
-        makeTransparent(x, y)
+        this.#makeTransparent(newfile, x, y)
       }
     }
 
     // top->bottom
     for(const x of Array(rect.width).keys()) {
       for(const y of Array(rect.height).keys()) {
-        const color = mapColor(x, y)
+        const color = this.#mapColor(source, x, y)
         if( this.imageAnalyzer.isOpaque(color) ) { break }
 
-        makeTransparent(x, y)
+        this.#makeTransparent(newfile, x, y)
       }
     }
 
     // right->left
     for(const y of Array(rect.height).keys()) {
+      if ( MARGIN.TOP < y && y < (rect.height - MARGIN.BOTTOM) ) { continue }
+
       for(const x of [...Array(rect.width).keys()].reverse()) {
-        const color = mapColor(x, y)
+        const color = this.#mapColor(source, x, y)
         if( this.imageAnalyzer.isOpaque(color) ) { break }
 
-        makeTransparent(x, y)
+        this.#makeTransparent(newfile, x, y)
       }
     }
 
     // bottom->top
     for(const x of Array(rect.width).keys()) {
+      if ( MARGIN.LEFT < x && x < (rect.width - MARGIN.RIGHT) ) { continue }
+
       for(const y of [...Array(rect.height).keys()].reverse()) {
-        const color = mapColor(x, y)
+        const color = this.#mapColor(source, x, y)
         if( this.imageAnalyzer.isOpaque(color) ) { break }
 
-        makeTransparent(x, y)
+        this.#makeTransparent(newfile, x, y)
       }
     }
+  }
+
+  #makeStraight(newfile) {
+    const source = Buffer.from(newfile.data)
+    const rect = this.imageAnalyzer.trimmingRect()
+
+    const MARGIN = {
+      LEFT: 30,
+      TOP: 30,
+      RIGHT: 12,
+      BOTTOM: 12
+    }
+
+    // left->right
+    const firstXs = this.#range(MARGIN.TOP, rect.height - MARGIN.BOTTOM).map(y => {
+      return [...Array(rect.width).keys()].find(x => this.imageAnalyzer.isOpaque(this.#mapColor(source, x, y)))
+    })
+    const maxX = Math.max(...firstXs);
+    [...Array(rect.height).keys()].forEach(y => {
+      const firstX = [...Array(rect.width).keys()].find(x => this.imageAnalyzer.isOpaque(this.#mapColor(source, x, y)))
+      if ( firstX == maxX - 1 ) {
+        this.#makeTransparent(newfile, firstX, y)
+      }
+    })
+
+    // top->bottom
+    const firstYs = this.#range(MARGIN.LEFT, rect.width - MARGIN.RIGHT).map(x => {
+      return [...Array(rect.height).keys()].find(y => this.imageAnalyzer.isOpaque(this.#mapColor(source, x, y)))
+    })
+    const maxY = Math.max(...firstYs);
+    [...Array(rect.width).keys()].forEach(x => {
+      const firstY = [...Array(rect.height).keys()].find(y => this.imageAnalyzer.isOpaque(this.#mapColor(source, x, y)))
+      if ( firstY == maxY - 1 ) {
+        this.#makeTransparent(newfile, x, firstY)
+      }
+    })
+  }
+
+  #posToIndex(x, y) {
+    return (this.rect.width * y + x) * 4
+  }
+
+  #mapColor(source, x, y) {
+    const index = this.#posToIndex(x, y)
+    return [0, 1, 2, 3].map(offset => source[index + offset])
+  }
+
+  #makeTransparent(newfile, x, y) {
+    const index = this.#posToIndex(x, y)
+    newfile.data[index]     = 0
+    newfile.data[index + 1] = 0
+    newfile.data[index + 2] = 0
+    newfile.data[index + 3] = 0
+  }
+
+  #range(a, b) {
+    return b > a
+      ? [...Array(b - a).keys()].map(e => e + a)
+      : [...Array(a - b).keys()].map(e => e + b).reverse()
   }
 }
 
